@@ -162,6 +162,10 @@ def create_datasets(tokenizer, dataset_name,
 # MAGIC %md
 # MAGIC
 # MAGIC ## Parameters
+# MAGIC
+# MAGIC We set output_dir to a local_disk0 folder\
+# MAGIC This is direct attached disk and will get flushed when cluster terminates\
+# MAGIC But will reduce write time
 
 # COMMAND ----------
 
@@ -174,9 +178,9 @@ lora_dropout=0.05
 lora_alpha=16
 
 # output_dir
-output_dir = '/tmp/lora_test'
-dbutils.fs.mkdirs(output_dir)
-dbfs_output_dir = f'/dbfs{output_dir}'
+local_output_dir = '/local_disk0/tmp/lora_test'
+#dbutils.fs.mkdirs(output_dir)
+#dbfs_output_dir = f'/dbfs{output_dir}'
 
 per_device_train_batch_size = 4
 gradient_accumulation_steps = 2
@@ -189,7 +193,7 @@ save_steps = 10
 group_by_length = False
 lr_scheduler_type = 'cosine'
 num_warmup_steps = 100
-optimizer_type = 'paged_adamw_32bit'
+optimizer_type = 'paged_adamw_32bit' # this requires newer transformers
 
 # dataset params
 dataset_name = "lvwerra/stack-exchange-paired"
@@ -203,10 +207,17 @@ seq_length = 1024
 
 # COMMAND ----------
 
-# DBTITLE 1,extra download config for huggingface
+# DBTITLE 1,Setting up download configs
 from datasets import DownloadConfig
 
+# this is to setup caching for the dataset
 local_disk_config = DownloadConfig(cache_dir='/local_disk0/datasets_cache')
+
+# set up caching for models - we will store to a folder under username
+username = spark.sql("SELECT current_user()").first()['current_user()']
+hf_cache_dir = f'/home/{username}/hf_cache'
+dbutils.fs.mkdirs(hf_cache_dir)
+dbfs_hf_cache_dir = f'/dbfs{hf_cache_dir}'
 
 # COMMAND ----------
 
@@ -228,9 +239,26 @@ base_model = AutoModelForCausalLM.from_pretrained(
     device_map='auto',
     trust_remote_code=True,
     use_auth_token=True,
+    cache_dir=dbfs_hf_cache_dir
 )
 base_model.config.use_cache = False
 
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # LoRa Configuration
+# MAGIC Understanding LoRa config is important to getting a good finetune\
+# MAGIC See HF docs for details: https://huggingface.co/docs/peft/conceptual_guides/lora 
+# MAGIC
+# MAGIC For full details see:  https://arxiv.org/pdf/2106.09685.pdf
+
+# COMMAND ----------
+
+# DBTITLE 1,Finding modules to target
+#for item in base_model.modules():
+#  print(item)
+
+# COMMAND ----------
 
 # COMMAND ----------
 
@@ -246,14 +274,26 @@ peft_config = LoraConfig(
     task_type="CAUSAL_LM",
 )
 
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_name, 
+                                          trust_remote_code=True,
+                                          cache_dir=dbfs_hf_cache_dir)
+
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "right"  # Fix weird overflow issue with fp16 training
 
 # COMMAND ----------
 
+# clean output dir first
+%sh rm -rf local_output_dir
+
+# COMMAND ----------
+
+# ddp seems to be the default config for this
+# ddp also has issues with notebooks
+# We needed to set `ddp_find_unused_parameters` to avoid this
+
 training_args = TrainingArguments(
-    output_dir=output_dir,
+    output_dir=local_output_dir,
     per_device_train_batch_size=per_device_train_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
     per_device_eval_batch_size=per_device_eval_batch_size,
@@ -269,6 +309,7 @@ training_args = TrainingArguments(
     bf16=True,
     remove_unused_columns=False,
     run_name="sft_llama2",
+    ddp_find_unused_parameters=False
 )
 
 
