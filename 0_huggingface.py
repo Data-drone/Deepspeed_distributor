@@ -1,16 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC
-# MAGIC # Testing out SFT step
+# MAGIC # Finetuning on Huggingface
 # MAGIC
-# MAGIC We need updates to transformers and also accelerate to get this work properly\
-# MAGIC As they are things that are installed on the os level in the prebuilt AMI it is best to update these on the os layer via init script 
-# MAGIC
-# MAGIC This code was tested on MLR 14.0
+# MAGIC This code was tested on MLR 13.2
 
 # COMMAND ----------
 
-# MAGIC %pip install transformers -U accelerate -U peft trl bitsandbytes
+# MAGIC %pip install peft==0.5.0
+# MAGIC %pip install datasets==2.12.0 bitsandbytes==0.41.0 einops==0.6.1 trl==0.4.7
+# MAGIC %pip install torch==2.0.1 accelerate==0.21.0 transformers==4.31.0
 
 # COMMAND ----------
 
@@ -20,7 +19,7 @@ dbutils.library.restartPython()
 
 # MAGIC %md
 # MAGIC
-# MAGIC ## Setup
+# MAGIC # Setup
 
 # COMMAND ----------
 
@@ -33,324 +32,219 @@ huggingface_hub.login(token=huggingface_key)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC
-# MAGIC **Extra Notes**
-# MAGIC
-# MAGIC We need to pack samples into a ConstantLengthDataset to optimise the training process\
-# MAGIC See: https://huggingface.co/docs/trl/main/en/sft_trainer#packing-dataset-constantlengthdataset
+# MAGIC # Setup the experiment
 
 # COMMAND ----------
 
+# load libs
 import os
-from dataclasses import dataclass, field
-from typing import Optional
-
+from pyspark.ml.torch.distributor import TorchDistributor
+from transformers import (
+  AutoModelForCausalLM, TrainingArguments, AutoTokenizer, 
+  DataCollatorForLanguageModeling, Trainer, BitsAndBytesConfig 
+) 
 import torch
+from peft import LoraConfig, get_peft_model
 from datasets import load_dataset
-from peft import AutoPeftModelForCausalLM, LoraConfig
-from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, HfArgumentParser, TrainingArguments
-
-from trl import SFTTrainer
-from trl.trainer import ConstantLengthDataset
-
+import mlflow
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC
-# MAGIC ## Functions
+# MLflow settings
+# We need to store out these settings to feed into our train function
+browser_host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().browserHostName().get()
+db_host = f"https://{browser_host}"
+db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
 
-# COMMAND ----------
-
-# DBTITLE 1,Functions
-def chars_token_ratio(dataset, tokenizer, nb_examples=400):
-    """
-    Estimate the average number of characters per token in the dataset.
-    """
-    total_characters, total_tokens = 0, 0
-    for _, example in tqdm(zip(range(nb_examples), iter(dataset)), total=nb_examples):
-        text = prepare_sample_text(example)
-        total_characters += len(text)
-        if tokenizer.is_fast:
-            total_tokens += len(tokenizer(text).tokens())
-        else:
-            total_tokens += len(tokenizer.tokenize(text))
-
-    return total_characters / total_tokens
-
-
-def print_trainable_parameters(model):
-    """
-    Prints the number of trainable parameters in the model.
-    """
-    trainable_params = 0
-    all_param = 0
-    for _, param in model.named_parameters():
-        all_param += param.numel()
-        if param.requires_grad:
-            trainable_params += param.numel()
-    print(
-        f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
-    )
-
-
-def prepare_sample_text(example):
-    """Prepare the text from a sample of the dataset."""
-    text = f"Question: {example['question']}\n\nAnswer: {example['response_j']}"
-    return text
-
-
-def create_datasets(tokenizer, dataset_name, 
-                    subset, split, num_workers, 
-                    streaming, size_valid_set, local_disk_config,
-                    shuffle_buffer, seq_length):
-    """
-    Create the dataset for the trainer
-    args required:
-      dataset_name
-      subset
-      split
-      num_workers / streaming
-      size_valid_set
-      shuffle_buffer
-      seq_length
-    """
-    dataset = load_dataset(
-        dataset_name,
-        data_dir=subset,
-        split=split,
-        use_auth_token=True,
-        download_config=local_disk_config,
-        num_proc=num_workers if not streaming else None,
-        streaming=streaming,
-    )
-    if streaming:
-        print("Loading the dataset in streaming mode")
-        valid_data = dataset.take(size_valid_set)
-        train_data = dataset.skip(size_valid_set)
-        train_data = train_data.shuffle(buffer_size=shuffle_buffer, seed=None)
-    else:
-        dataset = dataset.train_test_split(test_size=0.005, seed=None)
-        train_data = dataset["train"]
-        valid_data = dataset["test"]
-        print(f"Size of the train set: {len(train_data)}. Size of the validation set: {len(valid_data)}")
-
-    chars_per_token = chars_token_ratio(train_data, tokenizer)
-    print(f"The character to token ratio of the dataset is: {chars_per_token:.2f}")
-
-    train_dataset = ConstantLengthDataset(
-        tokenizer,
-        train_data,
-        formatting_func=prepare_sample_text,
-        infinite=True,
-        seq_length=seq_length,
-        chars_per_token=chars_per_token,
-    )
-    valid_dataset = ConstantLengthDataset(
-        tokenizer,
-        valid_data,
-        formatting_func=prepare_sample_text,
-        infinite=False,
-        seq_length=seq_length,
-        chars_per_token=chars_per_token,
-    )
-    return train_dataset, valid_dataset
-
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC ## Parameters
-# MAGIC
-# MAGIC We set output_dir to a local_disk0 folder\
-# MAGIC This is direct attached disk and will get flushed when cluster terminates\
-# MAGIC But will reduce write time
-
-# COMMAND ----------
-
-# DBTITLE 1,Params
-model_name = 'meta-llama/Llama-2-7b-hf'
-
-# See 
-lora_r=8
-lora_dropout=0.05
-lora_alpha=16
-
-# output_dir
-local_output_dir = '/local_disk0/tmp/lora_test'
-#dbutils.fs.mkdirs(output_dir)
-#dbfs_output_dir = f'/dbfs{output_dir}'
-
-per_device_train_batch_size = 4
-gradient_accumulation_steps = 2
-per_device_eval_batch_size = 1
-learning_rate = 1e-4
-logging_steps = 10
-max_steps = 500
-log_with = 'wandb' # tbd - to switch to mlflow
-save_steps = 10
-group_by_length = False
-lr_scheduler_type = 'cosine'
-num_warmup_steps = 100
-optimizer_type = 'paged_adamw_32bit' # this requires newer transformers
-
-# dataset params
-dataset_name = "lvwerra/stack-exchange-paired"
-subset = "data/finetune"
-split = 'train'
-num_workers = 4
-streaming = True
-size_valid_set = 4000
-shuffle_buffer = 5000
-seq_length = 1024
-
-# COMMAND ----------
-
-# DBTITLE 1,Setting up download configs
-from datasets import DownloadConfig
-
-# this is to setup caching for the dataset
-local_disk_config = DownloadConfig(cache_dir='/local_disk0/datasets_cache')
-
-# set up caching for models - we will store to a folder under username
 username = spark.sql("SELECT current_user()").first()['current_user()']
-hf_cache_dir = f'/home/{username}/hf_cache'
-dbutils.fs.mkdirs(hf_cache_dir)
-dbfs_hf_cache_dir = f'/dbfs{hf_cache_dir}'
+experiment_path = f'/Users/{username}/deepspeed-distributor'
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC
-# MAGIC # Setting Up Training Loop
-
+# MAGIC ## Training Args / Lora Configs
 # COMMAND ----------
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
-)
-
-base_model = AutoModelForCausalLM.from_pretrained(
-    model_name,
-    quantization_config=bnb_config,
-    device_map='auto',
-    trust_remote_code=True,
-    use_auth_token=True,
-    cache_dir=dbfs_hf_cache_dir
-)
-base_model.config.use_cache = False
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # LoRa Configuration
-# MAGIC Understanding LoRa config is important to getting a good finetune\
-# MAGIC See HF docs for details: https://huggingface.co/docs/peft/conceptual_guides/lora 
-# MAGIC
-# MAGIC For full details see:  https://arxiv.org/pdf/2106.09685.pdf
-
-# COMMAND ----------
-
-# DBTITLE 1,Finding modules to target
-#for item in base_model.modules():
-#  print(item)
-
-# COMMAND ----------
-
-# COMMAND ----------
-
-# We need to explore more this config with the target_modules
-# See Tim Dettmers discussion
+# Configuration
+lora_alpha = 16
+lora_dropout = 0.1
+lora_r = 64
 
 peft_config = LoraConfig(
-    r=lora_r,
     lora_alpha=lora_alpha,
     lora_dropout=lora_dropout,
-    target_modules=["q_proj", "v_proj"],
+    r=lora_r,
     bias="none",
     task_type="CAUSAL_LM",
+    target_modules=['q_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj', 'k_proj', 'v_proj'] # Choose all linear layers from the model
 )
 
-tokenizer = AutoTokenizer.from_pretrained(model_name, 
-                                          trust_remote_code=True,
-                                          cache_dir=dbfs_hf_cache_dir)
+output_dir = "/local_disk0/results"
+per_device_train_batch_size = 4
+gradient_accumulation_steps = 4
+optim = "paged_adamw_32bit"
+save_steps = 500
+logging_steps = 100
+learning_rate = 2e-4
+max_grad_norm = 0.3
+max_steps = 1000
+warmup_ratio = 0.03
+lr_scheduler_type = "constant"
 
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"  # Fix weird overflow issue with fp16 training
-
-# COMMAND ----------
-
-# clean output dir first
-%sh rm -rf local_output_dir
-
-# COMMAND ----------
-
-# ddp seems to be the default config for this
-# ddp also has issues with notebooks
-# We needed to set `ddp_find_unused_parameters` to avoid this
-
-training_args = TrainingArguments(
-    output_dir=local_output_dir,
+training_arguments = TrainingArguments(
+    output_dir=output_dir,
     per_device_train_batch_size=per_device_train_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    per_device_eval_batch_size=per_device_eval_batch_size,
-    learning_rate=learning_rate,
-    logging_steps=logging_steps,
-    max_steps=max_steps,
-    #report_to=log_with,
+    optim=optim,
     save_steps=save_steps,
-    group_by_length=group_by_length,
+    logging_steps=logging_steps,
+    learning_rate=learning_rate,
+    fp16=True,
+    max_grad_norm=max_grad_norm,
+    max_steps=max_steps,
+    warmup_ratio=warmup_ratio,
+    group_by_length=True,
     lr_scheduler_type=lr_scheduler_type,
-    warmup_steps=num_warmup_steps,
-    optim=optimizer_type,
-    bf16=True,
-    remove_unused_columns=False,
-    run_name="sft_llama2",
-    ddp_find_unused_parameters=False
+    ddp_find_unused_parameters=False,
 )
 
 
 # COMMAND ----------
 
-train_dataset, eval_dataset = create_datasets(tokenizer, dataset_name, 
-                    subset, split, num_workers, 
-                    streaming, size_valid_set, local_disk_config,
-                    shuffle_buffer, seq_length)
+def setup_data(tokenizer, dataset):
+
+    #dataset_name = "databricks/databricks-dolly-15k"
+    #dataset = load_dataset(dataset_name, split="train")
+
+    INTRO_BLURB = "Below is an instruction that describes a task. Write a response that appropriately completes the request."
+    INSTRUCTION_KEY = "### Instruction:"
+    INPUT_KEY = "Input:"
+    RESPONSE_KEY = "### Response:"
+    END_KEY = "### End"
+    
+    PROMPT_NO_INPUT_FORMAT = """{intro}
+    
+    {instruction_key}
+    {instruction}
+    
+    {response_key}
+    {response}
+    
+    {end_key}""".format(
+      intro=INTRO_BLURB,
+      instruction_key=INSTRUCTION_KEY,
+      instruction="{instruction}",
+      response_key=RESPONSE_KEY,
+      response="{response}",
+      end_key=END_KEY
+    )
+    
+    PROMPT_WITH_INPUT_FORMAT = """{intro}
+    
+    {instruction_key}
+    {instruction}
+    
+    {input_key}
+    {input}
+    
+    {response_key}
+    {response}
+    
+    {end_key}""".format(
+      intro=INTRO_BLURB,
+      instruction_key=INSTRUCTION_KEY,
+      instruction="{instruction}",
+      input_key=INPUT_KEY,
+      input="{input}",
+      response_key=RESPONSE_KEY,
+      response="{response}",
+      end_key=END_KEY
+    )
+    
+    def apply_prompt_template(examples):
+      instruction = examples["instruction"]
+      response = examples["response"]
+      context = examples.get("context")
+    
+      if context:
+        full_prompt = PROMPT_WITH_INPUT_FORMAT.format(instruction=instruction, response=response, input=context)
+      else:
+        full_prompt = PROMPT_NO_INPUT_FORMAT.format(instruction=instruction, response=response)
+      return { "text": full_prompt }
+    
+    dataset = dataset.map(apply_prompt_template)
+
+    # need to add in processing to make it tokenized?
+    def tokenize_function(allEntries):
+      return tokenizer(allEntries['text'], truncation=True, max_length=512,)
+
+    dataset = dataset.map(tokenize_function)
+
+    return dataset
+# COMMAND ----------
+
+def train(peft_config, training_arguments, dataset):
+    
+    os.environ['DATABRICKS_HOST'] = db_host
+    os.environ['DATABRICKS_TOKEN'] = db_token
+
+    mlflow.set_experiment(experiment_path)
+
+    model_id = "meta-llama/Llama-2-7b-hf"
+    revision = "351b2c357c69b4779bde72c0e7f7da639443d904"
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+    )
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        #quantization_config=bnb_config,
+        device_map = {"":int(os.environ.get("LOCAL_RANK"))},
+        revision=revision,
+        quantization_config=bnb_config,
+        #torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+    )
+
+    # We don't want the trainer to auto distribute the model
+    # I think?
+    model.is_parallelizable = False
+    model.model_parallel = False
+
+    model = get_peft_model(model, peft_config)
+
+    # Setup tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    train_dataset = setup_data(tokenizer, dataset)
+
+    # setup trainer
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer, mlm=False
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_arguments,
+        data_collator=data_collator,
+        train_dataset=train_dataset
+        #eval_dataset=val_dataset,
+    )
+
+    trainer.train()
+
+    return trainer
 
 # COMMAND ----------
 
-trainer = SFTTrainer(
-    model=base_model,
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-    peft_config=peft_config,
-    packing=True,
-    max_seq_length=None,
-    tokenizer=tokenizer,
-    args=training_args,
-)
 
+dataset_name = "databricks/databricks-dolly-15k"
+dataset = load_dataset(dataset_name, split="train")
 
 # COMMAND ----------
 
-trainer.train()
+distributor = TorchDistributor(num_processes=1, local_mode=True, use_gpu=True)
 
-# COMMAND ----------
-
-trainer.save_model(output_dir)
-
-output_dir = os.path.join(output_dir, "final_checkpoint")
-trainer.model.save_pretrained(output_dir)
-
-# Free memory for merging weights
-del base_model
-torch.cuda.empty_cache()
-
-model = AutoPeftModelForCausalLM.from_pretrained(output_dir, device_map="auto", torch_dtype=torch.bfloat16)
-model = model.merge_and_unload()
-
-output_merged_dir = os.path.join(output_dir, "final_merged_checkpoint")
-model.save_pretrained(output_merged_dir, safe_serialization=True)
+completed_trainer = distributor.run(train, peft_config, training_arguments, dataset)
