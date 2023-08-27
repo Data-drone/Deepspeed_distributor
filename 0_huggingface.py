@@ -1,9 +1,10 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC
-# MAGIC # Finetuning on Huggingface
+# MAGIC # Finetuning on Huggingface wo ZeRO and deepspeed
 # MAGIC
 # MAGIC This code was tested on MLR 13.2
+# MAGIC Requres A100s
 
 # COMMAND ----------
 
