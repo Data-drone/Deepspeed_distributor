@@ -7,18 +7,10 @@
 # MAGIC This is to fine-tune [llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf) models on the [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) dataset.
 # MAGIC
 # MAGIC Environment for this notebook:
-# MAGIC - Runtime: 13.2 GPU ML Runtime
+# MAGIC - Runtime: 14.0 GPU ML Runtime
 # MAGIC - Instance: `g5.8xlarge` on AWS, `Standard_NV36ads_A10_v5` on Azure
 # MAGIC
 # MAGIC We leverage the PEFT library from Hugging Face, as well as QLoRA for more memory efficient finetuning.
-# COMMAND ----------
-
-from huggingface_hub
-
-# Login to Huggingface to get access to the model
-huggingface_key = dbutils.secrets.get(scope='brian-hf', key='hf-key')
-huggingface_hub.login(token=huggingface_key)
-
 
 # COMMAND ----------
 
@@ -35,6 +27,32 @@ huggingface_hub.login(token=huggingface_key)
 # COMMAND ----------
 
 dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import huggingface_hub
+
+# Login to Huggingface to get access to the model
+huggingface_key = dbutils.secrets.get(scope='brian-hf', key='hf-key')
+huggingface_hub.login(token=huggingface_key)
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Databricks config
+
+# COMMAND ----------
+
+import mlflow
+
+browser_host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().browserHostName().get()
+db_host = f"https://{browser_host}"
+db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+
+username = spark.sql("SELECT current_user()").first()['current_user()']
+experiment_path = f'/Users/{username}/deepspeed-distributor'
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -47,7 +65,7 @@ dbutils.library.restartPython()
 from datasets import load_dataset
 
 dataset_name = "databricks/databricks-dolly-15k"
-dataset = load_dataset(dataset_name, split="train")
+#dataset = load_dataset(dataset_name, split="train")
 
 # COMMAND ----------
 
@@ -107,11 +125,70 @@ def apply_prompt_template(examples):
     full_prompt = PROMPT_NO_INPUT_FORMAT.format(instruction=instruction, response=response)
   return { "text": full_prompt }
 
-dataset = dataset.map(apply_prompt_template)
+# COMMAND ----------
+
+from torch.utils.data import DataLoader
+from accelerate import Accelerator
+
+def get_dataloaders(dataset, accelerator, tokenizer, batch_size = 4):
+   
+    #dataset = load_dataset(dataset_name, split="train")
+    
+    def tokenizer_function(example):
+       outputs = tokenizer(example["text"], truncation=True, max_length=128,
+                           return_overflowing_tokens=True)
+       
+       sample_map = outputs.pop("overflow_to_sample_mapping")
+       for key, values in example.items():
+          outputs[key] = [values[i] for i in sample_map]
+       return outputs
+    
+    with accelerator.main_process_first():
+       dataset = dataset.map(apply_prompt_template)
+       tokenized_datasets = dataset.map(
+          tokenizer_function,
+          batched=True,
+          writer_batch_size=100,
+          remove_columns=["instruction", "context", "response", "category"]
+       )
+    
+    def collate_fn(examples):
+       max_length = 1000
+       return tokenizer.pad(examples,
+                            max_length=max_length,
+                            return_tensors="pt"
+                            )
+    
+    train_dataloader = DataLoader(
+       tokenized_datasets, shuffle=True, collate_fn=collate_fn, 
+       batch_size=batch_size, drop_last=True
+    )
+
+    return train_dataloader
 
 # COMMAND ----------
 
-dataset["text"][0]
+def get_mapped_dataset(dataset):
+   
+   dataset = dataset.map(apply_prompt_template)
+
+   return dataset
+
+# COMMAND ----------
+
+# basic dataloader - lets move the tokenization to the sft loader?
+
+def get_untokenized_dataloaders(dataset, accelerator, tokenizer, batch_size = 4):
+
+    with accelerator.main_process_first():
+       dataset = dataset.map(apply_prompt_template)
+
+    train_dataloader = DataLoader(
+       dataset, shuffle=True,
+       batch_size=batch_size, drop_last=True
+    )
+
+    return train_dataloader
 
 # COMMAND ----------
 
@@ -122,28 +199,41 @@ dataset["text"][0]
 
 # COMMAND ----------
 
+from huggingface_hub import snapshot_download
+
+model_id = "meta-llama/Llama-2-7b-hf"
+revision = "351b2c357c69b4779bde72c0e7f7da639443d904"
+
+local_stash = '/local_disk0/llama-2-7b'
+
+snapshot_download(model_id, local_dir=local_stash)
+
+# COMMAND ----------
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, AutoTokenizer
 
-model = "meta-llama/Llama-2-7b-hf"
-revision = "351b2c357c69b4779bde72c0e7f7da639443d904"
+def create_model():
+  
+  tokenizer = AutoTokenizer.from_pretrained(local_stash, local_files_only=True)
+  tokenizer.pad_token = tokenizer.eos_token
 
-tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-tokenizer.pad_token = tokenizer.eos_token
-
-bnb_config = BitsAndBytesConfig(
+  bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.float16,
-)
+  )
 
-model = AutoModelForCausalLM.from_pretrained(
-    model,
+  model = AutoModelForCausalLM.from_pretrained(
+    local_stash,
     quantization_config=bnb_config,
     revision=revision,
-    trust_remote_code=True,
-)
-model.config.use_cache = False
+    device_map={'':torch.cuda.current_device()},
+    local_files_only=True,
+  )
+  model.config.use_cache = False
+
+  return tokenizer, model
 
 # COMMAND ----------
 
@@ -173,10 +263,6 @@ peft_config = LoraConfig(
 
 # MAGIC %md
 # MAGIC ## Loading the trainer
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC Here we will use the [`SFTTrainer` from TRL library](https://huggingface.co/docs/trl/main/en/sft_trainer) that gives a wrapper around transformers `Trainer` to easily fine-tune models on instruction based datasets using PEFT adapters. Let's first load the training arguments below.
 
 # COMMAND ----------
@@ -207,7 +293,7 @@ training_arguments = TrainingArguments(
     max_grad_norm=max_grad_norm,
     max_steps=max_steps,
     warmup_ratio=warmup_ratio,
-    group_by_length=True,
+    group_by_length=False,
     lr_scheduler_type=lr_scheduler_type,
     ddp_find_unused_parameters=False,
 )
@@ -215,48 +301,67 @@ training_arguments = TrainingArguments(
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Then finally pass everthing to the trainer
+# MAGIC ## Train the model
+
+# COMMAND ----------
+# fix for dataset issue?
+dataset = load_dataset(dataset_name, split="train")
 
 # COMMAND ----------
 
 from trl import SFTTrainer
+from trl.trainer.utils import ConstantLengthDataset
+from pyspark.ml.torch.distributor import TorchDistributor
+from accelerate import Accelerator
+from accelerate.data_loader import prepare_data_loader
+import os
 
-max_seq_length = 512
+def main():
+   
+   accelerator = Accelerator()
+   
+   os.environ['DATABRICKS_HOST'] = db_host
+   os.environ['DATABRICKS_TOKEN'] = db_token
 
-trainer = SFTTrainer(
+   mlflow.set_experiment(experiment_path)
+
+   max_seq_length = 512
+
+   tokenizer, model = create_model()
+
+   train_dataset = get_mapped_dataset(dataset)
+  
+   # setup data loader
+   #pt_loader = DataLoader(dataset)
+
+   train_loader = ConstantLengthDataset(tokenizer, train_dataset, 
+                                        dataset_text_field='text')
+
+   #train_loader = prepare_data_loader(pt_loader, device=torch.cuda.current_device())
+   train_loader = accelerator.prepare(train_loader)
+
+   trainer = SFTTrainer(
     model=model,
-    train_dataset=dataset,
+    train_dataset=train_loader,
     peft_config=peft_config,
     dataset_text_field="text",
     max_seq_length=max_seq_length,
     tokenizer=tokenizer,
     args=training_arguments,
-)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC We will also pre-process the model by upcasting the layer norms in float 32 for more stable training
-
-# COMMAND ----------
-
-for name, module in trainer.model.named_modules():
+  )
+   
+   for name, module in trainer.model.named_modules():
     if "norm" in name:
         module = module.to(torch.float32)
 
-# COMMAND ----------
+   trainer.train()
 
-# MAGIC %md
-# MAGIC ## Train the model
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC Now let's train the model! Simply call `trainer.train()`
+   return trainer
 
 # COMMAND ----------
 
-trainer.train()
+distributor = TorchDistributor(num_processes=2, local_mode=True, use_gpu=True)
+completed_trainer = distributor.run(main)
 
 # COMMAND ----------
 
