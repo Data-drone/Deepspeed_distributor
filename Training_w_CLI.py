@@ -7,7 +7,7 @@
 
 # MAGIC %sh
 # MAGIC # to install into the root env
-# MAGIC /databricks/python/bin/pip install -U accelerate==0.18.0 peft==0.4.0 deepspeed==0.9.4 bitsandbytes==0.39.1 trl==0.5.0 transformers==4.28.0
+# MAGIC /databricks/python/bin/pip install peft==0.4.0 deepspeed==0.9.4 bitsandbytes==0.39.1 trl==0.5.0
 
 # COMMAND ----------
 
