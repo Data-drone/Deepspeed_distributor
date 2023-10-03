@@ -318,7 +318,7 @@ import os
 
 def main():
    
-   accelerator = Accelerator()
+   accelerator = Accelerator(device_placement=False)
    
    os.environ['DATABRICKS_HOST'] = db_host
    os.environ['DATABRICKS_TOKEN'] = db_token
@@ -362,6 +362,15 @@ def main():
 
 distributor = TorchDistributor(num_processes=2, local_mode=True, use_gpu=True)
 completed_trainer = distributor.run(main)
+
+# COMMAND ----------
+
+os.environ['DATABRICKS_HOST'] = db_host
+os.environ['DATABRICKS_TOKEN'] = db_token
+
+# COMMAND ----------
+
+# MAGIC %sh torchrun --nnodes 1 --nproc-per-node 2 /Workspace/Users/brian.law@databricks.com/.ide/Deepspeed_distributor-69ddcada/train_script.py
 
 # COMMAND ----------
 

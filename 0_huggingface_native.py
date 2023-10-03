@@ -3,14 +3,14 @@
 # MAGIC
 # MAGIC # Finetuning on Huggingface wo ZeRO and deepspeed
 # MAGIC
-# MAGIC This code was tested on MLR 13.2
-# MAGIC Requres A100s
+# MAGIC This code was tested on MLR 13.3
+# MAGIC Seems to requres A100s
 
 # COMMAND ----------
 
-# MAGIC %pip install peft==0.5.0
-# MAGIC %pip install datasets==2.12.0 bitsandbytes==0.41.0 einops==0.6.1 trl==0.4.7
-# MAGIC %pip install torch==2.0.1 accelerate==0.21.0 transformers==4.31.0
+# MAGIC %pip install peft==0.4.0 deepspeed==0.9.4 bitsandbytes==0.39.1 
+# MAGIC #%pip install datasets==2.12.0 bitsandbytes==0.41.0 einops==0.6.1 trl==0.4.7
+# MAGIC #%pip install torch==2.0.1 accelerate==0.21.0 transformers==4.31.0
 
 # COMMAND ----------
 
@@ -24,7 +24,7 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# TODO databricks secrets link and hf token guide
+# TODO Add databricks secrets link and hf token guide
 
 import huggingface_hub
 huggingface_key = dbutils.secrets.get(scope='brian-hf', key='hf-key')
@@ -107,6 +107,11 @@ training_arguments = TrainingArguments(
     ddp_find_unused_parameters=False,
 )
 
+# COMMAND ----------
+
+# DBTITLE 1,Load Dataset
+dataset_name = "databricks/databricks-dolly-15k"
+dataset = load_dataset(dataset_name, split="train")
 
 # COMMAND ----------
 
@@ -237,12 +242,6 @@ def train(peft_config, training_arguments, dataset):
     trainer.train()
 
     return trainer
-
-# COMMAND ----------
-
-
-dataset_name = "databricks/databricks-dolly-15k"
-dataset = load_dataset(dataset_name, split="train")
 
 # COMMAND ----------
 

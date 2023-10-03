@@ -3,31 +3,14 @@
 # MAGIC
 # MAGIC # Finetuning on Huggingface wo ZeRO and deepspeed
 # MAGIC
-# MAGIC This code was tested on MLR 13.3
+# MAGIC This code was tested on MLR 14.0 on a single node p4d.24xlarge and g5.12xlarge single node as well as cluster
 # MAGIC Based on: https://github.com/microsoft/DeepSpeedExamples/blob/902a0f6b2b4a87c8048c0ab3a823b749c0e218ab/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/main.py
-
-# COMMAND ----------
-
-# MAGIC # peft==0.4.0  bitsandbytes==0.39.1
-# MAGIC %pip install deepspeed==0.9.4 
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC
-# MAGIC # Setup
-
-# COMMAND ----------
-
-# TODO databricks secrets link and hf token guide
-
-import huggingface_hub
-huggingface_key = dbutils.secrets.get(scope='brian-hf', key='hf-key')
-huggingface_hub.login(token=huggingface_key)
+# MAGIC # Setup Experiment
 
 # COMMAND ----------
 
@@ -56,6 +39,7 @@ db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().api
 
 username = spark.sql("SELECT current_user()").first()['current_user()']
 experiment_path = f'/Users/{username}/deepspeed-distributor'
+model_cache_root = f'/home/{username}/hf_models'
 
 # COMMAND ----------
 
@@ -92,6 +76,7 @@ dbfs_datasets_cache = f'/dbfs{datasets_cache}'
 # COMMAND ----------
 
 # MAGIC %md # Deepspeed Configuration 
+# MAGIC Understanding ZeRo requirements
 
 # COMMAND ----------
 
@@ -127,12 +112,10 @@ deepspeed_dict = {
     "zero_optimization": {
         "stage": 3,
         "offload_optimizer": {
-            "device": device,
-            "pin_memory": True
+            "device": device
         },
         "offload_param": {
-            "device": "cpu",
-            "pin_memory": True
+            "device": device
         },
         "overlap_comm": True,
         "contiguous_gradients": True,
@@ -256,17 +239,15 @@ def train(*, dataset):
     os.environ['DATABRICKS_TOKEN'] = db_token
     
     # need to set these so that distributed workers can access the data and the key
-    os.environ['HF_DATASETS_CACHE'] = datasets_cache
-    os.environ['HUGGING_FACE_HUB_TOKEN'] = huggingface_key
+    os.environ['HF_DATASETS_CACHE'] = dbfs_datasets_cache
+    os.environ['NCCL_IB_DISABLE'] = '1'
+    os.environ['NCCL_P2P_DISABLE'] = '1'
 
-    
     mlflow.set_experiment(experiment_path)
 
     model_id = "meta-llama/Llama-2-7b-hf"
     revision = "351b2c357c69b4779bde72c0e7f7da639443d904"
-
-    #model_id = 'databricks/dolly-v2-3b'
-    #revision = 'f6c9be08f16fe4d3a719bee0a4a7c7415b5c65df'
+    model_path = f'/dbfs{model_cache_root}/llama_2_7b'
 
     ## setup the first part
 
@@ -275,33 +256,27 @@ def train(*, dataset):
     deepspeed.init_distributed()
     device = torch.device(get_accelerator().device_name())
 
-    #device = torch.device("cuda")
-
     global_rank = torch.distributed.get_rank()
 
-    #torch.distributed.barrier()
-
     # Setup tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True, padding=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=model_path, 
+                                              padding=True)
     tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+        model_path,
         #quantization_config=bnb_config,
         device_map = {"":int(local_rank)},
         revision=revision,
         torch_dtype = torch.bfloat16,
         #quantization_config=bnb_config,
         #torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
+        cache_dir=model_path, 
+        local_files_only=True
     )
-
-    # We don't want the trainer to auto distribute the model
-    # I think?
 
     train_dataset = setup_data(tokenizer, dataset)
     train_sampler = RandomSampler(train_dataset)
-
 
     # setup trainer
     data_collator = DataCollatorForLanguageModeling(
@@ -320,7 +295,6 @@ def train(*, dataset):
     optimizer = AdamOptimizer(model.parameters(),
                               lr=learning_rate,
                               betas=(0.9, 0.95))
-
 
     # model, optimizer
     initialised_var  = deepspeed.initialize(
@@ -359,7 +333,9 @@ dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_ca
 
 # COMMAND ----------
 
-distributor = DeepspeedTorchDistributor(numGpus=8, nnodes=1, localMode=True, 
+distributor = DeepspeedTorchDistributor(numGpus=4, nnodes=2, localMode=False, 
                                         useGpu=True, deepspeedConfig = deepspeed_dict)
 
 completed_trainer = distributor.run(train, dataset=dataset)
+
+# COMMAND ----------
