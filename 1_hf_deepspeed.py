@@ -1,9 +1,9 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC
-# MAGIC # Finetuning on Huggingface wo ZeRO and deepspeed
+# MAGIC # Finetuning on Huggingface w ZeRO and deepspeed
 # MAGIC
-# MAGIC This code was tested on MLR 14.0 on a single node p4d.24xlarge and g5.12xlarge single node as well as cluster
+# MAGIC This code was tested on MLR 14.0 on a single node p4d.24xlarge and g5.12xlarge single node as well as cluster \
 # MAGIC Based on: https://github.com/microsoft/DeepSpeedExamples/blob/902a0f6b2b4a87c8048c0ab3a823b749c0e218ab/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/main.py
 
 # COMMAND ----------
@@ -11,6 +11,10 @@
 # MAGIC %md
 # MAGIC
 # MAGIC # Setup Experiment
+# MAGIC
+# MAGIC Some of the key things we need to set include:
+# MAGIC - host and token
+# MAGIC - mlflow experiment path
 
 # COMMAND ----------
 
@@ -40,13 +44,6 @@ db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().api
 username = spark.sql("SELECT current_user()").first()['current_user()']
 experiment_path = f'/Users/{username}/deepspeed-distributor'
 model_cache_root = f'/home/{username}/hf_models'
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Dataset
-# MAGIC
-# MAGIC We will use the [databricks-dolly-15k ](https://huggingface.co/datasets/databricks/databricks-dolly-15k) dataset.
 
 # COMMAND ----------
 
@@ -324,7 +321,14 @@ def train(*, dataset):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # Run training
+# MAGIC # Main Training
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Dataset
+# MAGIC
+# MAGIC We will use the [databricks-dolly-15k ](https://huggingface.co/datasets/databricks/databricks-dolly-15k) dataset.
 
 # COMMAND ----------
 

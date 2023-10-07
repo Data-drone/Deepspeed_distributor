@@ -24,14 +24,6 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# TODO Add databricks secrets link and hf token guide
-
-import huggingface_hub
-huggingface_key = dbutils.secrets.get(scope='brian-hf', key='hf-key')
-huggingface_hub.login(token=huggingface_key)
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # Setup the experiment
 
@@ -58,6 +50,10 @@ db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().api
 
 username = spark.sql("SELECT current_user()").first()['current_user()']
 experiment_path = f'/Users/{username}/deepspeed-distributor'
+
+datasets_cache = f'/home/{username}/datasets_cache'
+model_cache_root = f'/home/{username}/hf_models'
+dbfs_datasets_cache = f'/dbfs{datasets_cache}'
 
 # COMMAND ----------
 
@@ -111,7 +107,7 @@ training_arguments = TrainingArguments(
 
 # DBTITLE 1,Load Dataset
 dataset_name = "databricks/databricks-dolly-15k"
-dataset = load_dataset(dataset_name, split="train")
+dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_cache)
 
 # COMMAND ----------
 
@@ -187,15 +183,20 @@ def setup_data(tokenizer, dataset):
     return dataset
 # COMMAND ----------
 
-def train(peft_config, training_arguments, dataset):
+def train(peft_config, training_arguments, dataset, distributor=True):
     
     os.environ['DATABRICKS_HOST'] = db_host
     os.environ['DATABRICKS_TOKEN'] = db_token
+
+    if distributor:
+      os.environ['NCCL_IB_DISABLE'] = '1'
+      os.environ['NCCL_P2P_DISABLE'] = '1'
 
     mlflow.set_experiment(experiment_path)
 
     model_id = "meta-llama/Llama-2-7b-hf"
     revision = "351b2c357c69b4779bde72c0e7f7da639443d904"
+    model_path = f'/dbfs{model_cache_root}/llama_2_7b'
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -204,13 +205,14 @@ def train(peft_config, training_arguments, dataset):
     )
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+        model_path,
         #quantization_config=bnb_config,
         device_map = {"":int(os.environ.get("LOCAL_RANK"))},
         revision=revision,
         quantization_config=bnb_config,
         #torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
+        cache_dir=model_path,
+        local_files_only=True
     )
 
     # We don't want the trainer to auto distribute the model
@@ -221,7 +223,7 @@ def train(peft_config, training_arguments, dataset):
     model = get_peft_model(model, peft_config)
 
     # Setup tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=model_path)
     tokenizer.pad_token = tokenizer.eos_token
 
     train_dataset = setup_data(tokenizer, dataset)
@@ -246,5 +248,73 @@ def train(peft_config, training_arguments, dataset):
 # COMMAND ----------
 
 distributor = TorchDistributor(num_processes=1, local_mode=True, use_gpu=True)
+
+completed_trainer = distributor.run(train, peft_config, training_arguments, dataset)
+
+# COMMAND ----------
+
+# Deepspeed test
+# Deepspeed config
+offload_cpu = True
+device = "cpu" if offload_cpu else "none"
+
+# When doing distributed train we can leave out train size
+# So that deepspeed will work it out otherwise can get config issues
+# "train_batch_size": global_batch_size,
+deepspeed_dict = {
+    "bf16": {
+        "enabled": "auto"
+    },
+
+    "optimizer": {
+        "type": "Adamw",
+        "params": {
+            "lr": 0.01,
+            "weight_decay": "auto"
+        }
+    },
+
+    "scheduler": {
+        "type": "WarmupLR",
+        "params": {
+            "warmup_min_lr": 0,
+            "warmup_max_lr": 1e-05,
+            "warmup_num_steps": 100
+        }
+    },
+
+    "zero_optimization": {
+        "stage": 3,
+        "offload_optimizer": {
+            "device": device
+        },
+        "offload_param": {
+            "device": device
+        },
+        "overlap_comm": True,
+        "contiguous_gradients": True,
+        "sub_group_size": 1e9,
+        "reduce_bucket_size": "auto",
+        "stage3_prefetch_bucket_size": "auto",
+        "stage3_param_persistence_threshold": "auto",
+        "stage3_max_live_parameters": 1e7,
+        "stage3_max_reuse_distance": 1e7,
+        "stage3_gather_16bit_weights_on_model_save": True
+    },
+
+    "gradient_accumulation_steps": 4,
+    "gradient_clipping": 1.0,
+    "steps_per_print": 1,
+    "train_micro_batch_size_per_gpu": 1,
+    "wall_clock_breakdown": True
+}
+
+
+# COMMAND ----------
+
+from pyspark.ml.deepspeed.deepspeed_distributor import DeepspeedTorchDistributor
+
+distributor = DeepspeedTorchDistributor(numGpus=4, nnodes=2, localMode=False, 
+                                        useGpu=True, deepspeedConfig = deepspeed_dict)
 
 completed_trainer = distributor.run(train, peft_config, training_arguments, dataset)
