@@ -82,7 +82,7 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
     logging_steps = 10
     learning_rate = shared_parameters['learning_rate']
     max_grad_norm = shared_parameters['gradient_clipping']
-    max_steps = 100
+    #max_steps = 100
     warmup_ratio = 0.03
     lr_scheduler_type = "constant"
 
@@ -96,7 +96,7 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
         learning_rate=learning_rate,
         fp16=True,
         max_grad_norm=max_grad_norm,
-        max_steps=max_steps,
+        num_train_epochs = 2,
         warmup_ratio=warmup_ratio,
         group_by_length=True,
         lr_scheduler_type=lr_scheduler_type,
@@ -116,183 +116,43 @@ dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_ca
 
 # COMMAND ----------
 
-def setup_data(tokenizer, dataset):
-
-    # This is our dataset setup function
-    
-    INTRO_BLURB = "Below is an instruction that describes a task. Write a response that appropriately completes the request."
-    INSTRUCTION_KEY = "### Instruction:"
-    INPUT_KEY = "Input:"
-    RESPONSE_KEY = "### Response:"
-    END_KEY = "### End"
-    
-    PROMPT_NO_INPUT_FORMAT = """{intro}
-    
-    {instruction_key}
-    {instruction}
-    
-    {response_key}
-    {response}
-    
-    {end_key}""".format(
-      intro=INTRO_BLURB,
-      instruction_key=INSTRUCTION_KEY,
-      instruction="{instruction}",
-      response_key=RESPONSE_KEY,
-      response="{response}",
-      end_key=END_KEY
-    )
-    
-    PROMPT_WITH_INPUT_FORMAT = """{intro}
-    
-    {instruction_key}
-    {instruction}
-    
-    {input_key}
-    {input}
-    
-    {response_key}
-    {response}
-    
-    {end_key}""".format(
-      intro=INTRO_BLURB,
-      instruction_key=INSTRUCTION_KEY,
-      instruction="{instruction}",
-      input_key=INPUT_KEY,
-      input="{input}",
-      response_key=RESPONSE_KEY,
-      response="{response}",
-      end_key=END_KEY
-    )
-    
-    def apply_prompt_template(examples):
-      instruction = examples["instruction"]
-      response = examples["response"]
-      context = examples.get("context")
-    
-      if context:
-        full_prompt = PROMPT_WITH_INPUT_FORMAT.format(instruction=instruction, response=response, input=context)
-      else:
-        full_prompt = PROMPT_NO_INPUT_FORMAT.format(instruction=instruction, response=response)
-      return { "text": full_prompt }
-    
-    dataset = dataset.map(apply_prompt_template)
-
-    # need to add in processing to make it tokenized?
-    def tokenize_function(allEntries):
-      return tokenizer(allEntries['text'], truncation=True, max_length=512,)
-
-    dataset = dataset.map(tokenize_function)
-
-    return dataset
+# DBTITLE 1,Function to reformat dataset to stanford alpaca format
+# MAGIC %run ./dataset_prep/setup_dataset
 
 # COMMAND ----------
 
-def train(peft_config, training_arguments, dataset, distributor=True, deepspeed=False):
-
-    # This is our main training function
-
-    from transformers import (
-       BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer,
-       DataCollatorForLanguageModeling, Trainer
-    )
-    from peft import get_peft_model
-
-    import mlflow
-    import torch
-
-    os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
-    os.environ['MLFLOW_EXPERIMENT_NAME'] = f'/Users/{username}/dist-torch'
-    #os.environ['HF_MLFLOW_LOG_ARTIFACTS'] = 'True'
-    
-    os.environ['DATABRICKS_HOST'] = db_host
-    os.environ['DATABRICKS_TOKEN'] = db_token
-
-    if distributor:
-      os.environ['NCCL_IB_DISABLE'] = '1'
-      os.environ['NCCL_P2P_DISABLE'] = '1'
-
-    mlflow.set_registry_uri('databricks')
-    mlflow.set_experiment(experiment_path)
-
-    model_id = "meta-llama/Llama-2-7b-hf"
-    revision = "351b2c357c69b4779bde72c0e7f7da639443d904"
-    model_path = f'/dbfs{model_cache_root}/llama_2_7b'
-
-    # bnb_config = BitsAndBytesConfig(
-    #     load_in_4bit=True,
-    #     bnb_4bit_quant_type="nf4",
-    #     bnb_4bit_compute_dtype=torch.float16,
-    # )
-
-    device_map_var = None if deepspeed else {"":int(os.environ.get("LOCAL_RANK"))}
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        device_map = device_map_var,
-        revision=revision,
-        #quantization_config=bnb_config,
-        torch_dtype=torch.bfloat16,
-        cache_dir=model_path,
-        local_files_only=True
-    )
-
-    # Do we still need to set these flags?
-    model.is_parallelizable = False
-    model.model_parallel = False
-
-    model = get_peft_model(model, peft_config)
-
-    # Setup tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=model_path)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    train_dataset = setup_data(tokenizer, dataset)
-
-    # setup trainer
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=False
-    )
-
-    trainer = Trainer(
-        model=model,
-        args=training_arguments,
-        data_collator=data_collator,
-        train_dataset=train_dataset
-        #eval_dataset=val_dataset,
-    )
-
-    trainer.train()
-
-    # if we return the trainer object we get an error
-    return 'done'
+# DBTITLE 1,HuggingFace Trainer train loop
+# MAGIC %run ./train_loops/hf_trainer_loop
 
 # COMMAND ----------
 
 # DBTITLE 1,Launch with Accelerate (single node only)
 from accelerate import notebook_launcher
 
-def accelerate_train():
-   
+def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
+
     peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
-                                                   mlflow_run_name='accelerate_run')
+                                                   mlflow_run_name=mlflow_run_name)
     trainer = train(peft_config, training_arguments, dataset, distributor=True)
 
     return trainer
 
-accelerate.utils.write_basic_config()
+# we need to write a config
+#accelerate.utils.write_basic_config()
 
 num_gpus_on_driver = 1
-notebook_launcher(accelerate_train, num_processes=num_gpus_on_driver)
+notebook_launcher(accelerate_train, (f'accelerate_run_{num_gpus_on_driver}_gpu', None), 
+                  num_processes=num_gpus_on_driver)
 
 # COMMAND ----------
 
 # DBTITLE 1,Launch with TorchDistributor
 from pyspark.ml.torch.distributor import TorchDistributor
 
-def accelerate_train():
+def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
    
     peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
-                                                   mlflow_run_name='torch_distributor')
+                                                   mlflow_run_name=mlflow_run_name)
     trainer = train(peft_config, training_arguments, dataset, distributor=True)
 
     return trainer
@@ -304,64 +164,12 @@ num_processes = num_gpus_per_node * num_nodes
 
 distributor = TorchDistributor(num_processes=num_processes, 
                                local_mode=True, use_gpu=True)
-completed_trainer = distributor.run(accelerate_train)
+completed_trainer = distributor.run(accelerate_train, f'distributor_run_multinode')
 
 # COMMAND ----------
 
 # DBTITLE 1,Launch with Deepspeed Distributor
-deepspeed_dict = {
-    "bf16": {
-        "enabled": "auto"
-    },
-
-    "optimizer": {
-        "type": "Adamw",
-        "params": {
-            "lr": shared_parameters['learning_rate'],
-            "weight_decay": "auto"
-        }
-    },
-
-    "scheduler": {
-        "type": "WarmupLR",
-        "params": {
-            "warmup_min_lr": 0,
-            "warmup_max_lr": shared_parameters['learning_rate'],
-            "warmup_num_steps": "auto"
-        }
-    },
-
-    "zero_optimization": {
-        "stage": 3,
-        "offload_optimizer": {
-            "device": 'cpu'
-        },
-        "offload_param": {
-            "device": 'cpu'
-        },
-        "overlap_comm": True,
-        "contiguous_gradients": True,
-        "sub_group_size": 1e9,
-        "reduce_bucket_size": "auto",
-        "stage3_prefetch_bucket_size": "auto",
-        "stage3_param_persistence_threshold": "auto",
-        "stage3_max_live_parameters": 1e7,
-        "stage3_max_reuse_distance": 1e7,
-        "stage3_gather_16bit_weights_on_model_save": True
-    },
-    "tensorboard": {
-      "enabled": True,
-      "output_path": '/local_disk0/tensorboard',
-      "job_name": "finetune_llama_2_7b"
-    },
-
-    "gradient_accumulation_steps": shared_parameters['gradient_accumulation_steps'],
-    "gradient_clipping": shared_parameters['gradient_clipping'],
-    "steps_per_print": 1,
-    "train_micro_batch_size_per_gpu": shared_parameters['per_device_batch_size'],
-    "train_batch_size": "auto",
-    "wall_clock_breakdown": True
-}
+# MAGIC %run ./configs/deepspeed_configs
 
 # COMMAND ----------
 
