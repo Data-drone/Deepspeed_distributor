@@ -3,7 +3,7 @@
 # MAGIC
 # MAGIC ### HF Trainer train loop
 # MAGIC This utilises hf trainer
-# MAGIC as of 4.34 it works with ZeRo 1 and 2 but not 3
+# MAGIC fixed with deepspeed 0.12.3
 
 # COMMAND ----------
 
@@ -20,9 +20,10 @@ def train(peft_config, training_arguments, dataset, distributor=True, deepspeed=
 
     import mlflow
     import torch
+    import os
 
     os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
-    os.environ['MLFLOW_EXPERIMENT_NAME'] = f'/Users/{username}/dist-torch'
+    os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
     #os.environ['HF_MLFLOW_LOG_ARTIFACTS'] = 'True'
     
     os.environ['DATABRICKS_HOST'] = db_host
@@ -33,7 +34,6 @@ def train(peft_config, training_arguments, dataset, distributor=True, deepspeed=
       os.environ['NCCL_P2P_DISABLE'] = '1'
 
     mlflow.set_registry_uri('databricks')
-    mlflow.set_experiment(experiment_path)
 
     model_path = f'/dbfs{model_cache_root}/llama_2_7b'
 

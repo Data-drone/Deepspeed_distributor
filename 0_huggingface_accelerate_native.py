@@ -1,12 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC
-# MAGIC # Finetuning on Huggingface wo ZeRO and deepspeed
+# MAGIC # Training and Finetuning on Huggingface w ZeRO and deepspeed
 # MAGIC
-# MAGIC This code was tested on MLR 14.2
 # MAGIC Lets see how we can scale the native library functions \
-# MAGIC Note that this will just work on single node \
 # MAGIC But this is how we can leverage Accelerate driven HF Trainer on Databricks
+# MAGIC 
+# MAGIC *Notes*
+# MAGIC This code was tested on MLR 14.2 \
+# MAGIC Versions of transformers and deepspeed are quite important \
+# MAGIC Quantisation support varies
 
 # COMMAND ----------
 
@@ -19,7 +22,6 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 # we can create a generic setup
-import accelerate
 from datasets import load_dataset
 import os
 
@@ -127,6 +129,7 @@ dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_ca
 # COMMAND ----------
 
 # DBTITLE 1,Launch with Accelerate (single node only)
+import accelerate
 from accelerate import notebook_launcher
 
 def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
@@ -173,20 +176,53 @@ completed_trainer = distributor.run(accelerate_train, f'distributor_run_multinod
 
 # COMMAND ----------
 
+# DBTITLE 1, Low Level Loop
+# MAGIC %run ./train_loops/hf_accelerate_low_level_loop
+# COMMAND ----------
+
 from pyspark.ml.deepspeed.deepspeed_distributor import DeepspeedTorchDistributor
 
+def parse_deepspeed():
+    """
+    DeepSpeed Distributor adds in the deepspeed configurations params
+    We can receive and use them with argparse
+    """
+
+    import argparse
+    import deepspeed
+
+    parser = argparse.ArgumentParser(description='Torch Distributor Training')
+    parser = deepspeed.add_config_arguments(parser)
+
+    return parser
+
+
 def deepspeed_train():
+    
+    parsed_args = parse_deepspeed().parse_args()
+    print(parsed_args)
    
     peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
-                                                   mlflow_run_name='deepspeed_distributor_w_config',
-                                                   deepspeed_config=deepspeed_dict)
-    trainer = train(peft_config, training_arguments, dataset, 
-                    distributor=True, deepspeed=True)
+                                                   mlflow_run_name='deepspeed_distributor_w_config_low_level',
+                                                   deepspeed_config=parsed_args.deepspeed_config)
+    # can use `train` too
+    trainer = full_train_loop(peft_config, training_arguments, dataset, 
+                    distributor=True)
 
     return trainer
 
+num_gpus = 2
+num_nodes = 1
+num_processes = num_gpus * num_nodes
+deepspeed_dict = deepspeed_zero_1
 
-distributor = DeepspeedTorchDistributor(numGpus=1, nnodes=2, localMode=False, 
+deepspeed_dict['train_batch_size'] = (
+    shared_parameters["per_device_batch_size"] *
+    shared_parameters["gradient_accumulation_steps"] *
+    num_processes
+)
+
+distributor = DeepspeedTorchDistributor(numGpus=num_gpus, nnodes=num_nodes, localMode=True, 
                                         useGpu=True, deepspeedConfig = deepspeed_dict)
 
 completed_trainer = distributor.run(deepspeed_train)
