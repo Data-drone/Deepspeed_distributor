@@ -177,7 +177,7 @@ completed_trainer = distributor.run(accelerate_train, f'distributor_run_multinod
 # COMMAND ----------
 
 # DBTITLE 1, Low Level Loop
-# MAGIC %run ./train_loops/hf_accelerate_low_level_loop
+# MAGIC %run ./train_loops/deepspeed_manual_loop
 # COMMAND ----------
 
 from pyspark.ml.deepspeed.deepspeed_distributor import DeepspeedTorchDistributor
