@@ -53,10 +53,11 @@ def full_train_loop(peft_config, training_arguments, dataset, distributor:bool=T
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        device_map = {"":int(local_rank)},
+        #device_map = {"":int(local_rank)},
         torch_dtype=torch.bfloat16,
         cache_dir=model_path,
-        local_files_only=True
+        local_files_only=True,
+        low_cpu_mem_usage=False
     )
 
     # Do we still need to set these flags?
@@ -74,7 +75,7 @@ def full_train_loop(peft_config, training_arguments, dataset, distributor:bool=T
 
     # This specific processing is required to make sure it works
     # with the DataLoader and train loop properly
-    train_dataset = train_dataset.remove_columns(['instruction', 'response', 'context', 'text', 'category'])
+    #train_dataset = train_dataset.remove_columns(['instruction', 'response', 'context', 'text', 'category'])
 
     # setup trainer
     data_collator = DataCollatorForLanguageModeling(
@@ -89,13 +90,15 @@ def full_train_loop(peft_config, training_arguments, dataset, distributor:bool=T
 
     try: 
         offload_device = training_arguments.deepspeed['zero_optimization']['offload_optimizer']['device']
+        print(offload_device)
     except TypeError:
         offload_device = None
 
-    if offload_device == 'cpu':
-        AdamOptimizer = DeepSpeedCPUAdam 
-    else:
-        AdamOptimizer = FusedAdam
+    #if offload_device == 'cpu':
+    #    AdamOptimizer = DeepSpeedCPUAdam 
+    #else:
+    #    AdamOptimizer = FusedAdam
+    AdamOptimizer = DeepSpeedCPUAdam
 
     optimizer = AdamOptimizer(model.parameters(),
                               lr=training_arguments.learning_rate,

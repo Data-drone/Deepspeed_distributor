@@ -43,7 +43,8 @@ def train(peft_config, training_arguments, dataset, distributor=True, deepspeed=
         device_map = device_map_var,
         torch_dtype=torch.bfloat16,
         cache_dir=model_path,
-        local_files_only=True
+        local_files_only=True,
+        low_cpu_mem_usage=False # we set this so that we don't have issues with ZeRo 3
     )
 
     # Do we still need to set these flags?

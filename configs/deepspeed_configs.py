@@ -53,12 +53,12 @@ deepspeed_base = {
 deepspeed_zero_1 = deepspeed_base
 deepspeed_zero_1['zero_optimization'] = {
         "stage": 1,
+        "overlap_comm": True,
+        "contiguous_gradients": True,
         "allgather_partitions": True,
         "allgather_bucket_size": 500000000,
-        "overlap_comm": True,
         "reduce_scatter": True,
         "reduce_bucket_size": 500000000,
-        "contiguous_gradients": True,
         "cpu_offload": False
       }
 
@@ -68,8 +68,6 @@ deepspeed_zero_1['zero_optimization'] = {
 deepspeed_zero_2 = deepspeed_base
 deepspeed_zero_2['zero_optimization'] = {
         "stage": 2,
-        "overlap_comm": True,
-        "contiguous_gradients": True,
         "sub_group_size": 1e9,
         "reduce_bucket_size": "auto"
     }
@@ -80,8 +78,6 @@ deepspeed_zero_2['zero_optimization'] = {
 deepspeed_zero_3 = deepspeed_base
 deepspeed_zero_3['zero_optimization'] = {
         "stage": 3,
-        "overlap_comm": True,
-        "contiguous_gradients": True,
         "sub_group_size": 1e9,
         "reduce_bucket_size": "auto",
         "stage3_prefetch_bucket_size": "auto",

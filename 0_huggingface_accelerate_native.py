@@ -9,11 +9,10 @@
 # MAGIC *Notes*
 # MAGIC This code was tested on MLR 14.2 \
 # MAGIC Versions of transformers and deepspeed are quite important \
-# MAGIC Quantisation support varies
 
 # COMMAND ----------
 
-# MAGIC %pip install peft==0.6.0 deepspeed==0.12.1 bitsandbytes==0.41.1
+# MAGIC %pip install peft==0.6.0 deepspeed==0.12.3 bitsandbytes==0.41.1
 
 # COMMAND ----------
 
@@ -25,6 +24,14 @@ dbutils.library.restartPython()
 from datasets import load_dataset
 import os
 
+# COMMAND ----------
+
+# MAGIC %md 
+# MAGIC # Environment Configurations
+# MAGIC To start with, we will setup some basic configurations \
+# MAGIC We log the notebook token and host so that we can connect to the mlflow service correctly \
+# MAGIC We will also manually setup an mlflow experiment \
+# MAGIC The cache directories we setup to make sure that models are datasets are use dbfs object store paths so that all data and models are persisted
 
 # COMMAND ----------
 
@@ -33,6 +40,7 @@ browser_host = spark.conf.get("spark.databricks.workspaceUrl")
 db_host = f"https://{browser_host}"
 db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
 
+# MLflow configuration
 username = spark.sql("SELECT current_user()").first()['current_user()']
 experiment_path = f'/Users/{username}/deepspeed-distributor'
 
@@ -40,10 +48,15 @@ datasets_cache = f'/home/{username}/datasets_cache'
 model_cache_root = f'/home/{username}/hf_models'
 dbfs_datasets_cache = f'/dbfs{datasets_cache}'
 
-
 # COMMAND ----------
 
-# we need to make sure that a whole bunch of parameters are aligned between deepspeed and hf
+# MAGIC %md
+# MAGIC # Training Parameter Configurations
+# MAGIC When using HuggingFace together with Deepspeed we need to make sure certain parameters are correctly aligned. \
+# MAGIC Otherwise the training code will not know whether to use the HF configured `batch_size` or deepspeed one for example. \
+# MAGIC
+# MAGIC The way we will ensure this is to setup a shared parameter dictionary that both the HF Training Arguments and DeepSpeed configuration will read from.
+# COMMAND ----------
 
 shared_parameters = {
    "gradient_accumulation_steps": 1,
@@ -58,8 +71,10 @@ shared_parameters = {
 def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deepspeed_config=None):
 
     # setup training arguments
-    # We do this inside a function so that we don't initialise cuda before Accelerate takes over 
+    # We do this inside a function so that we don't initialise cuda before Accelerate takes over
+    # this is needed for `Accelerate` notebook launcher to work.  
 
+    # the PEFT calls for LoRa training are only used if we do LoRa training
     from peft import LoraConfig
     from transformers import TrainingArguments
 
@@ -88,6 +103,7 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
     warmup_ratio = 0.03
     lr_scheduler_type = "constant"
 
+    # this is the HF TrainingArguments object which is needed for the HF Trainer
     training_arguments = TrainingArguments(
         output_dir=output_dir,
         per_device_train_batch_size=per_device_train_batch_size,
@@ -109,10 +125,12 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
 
     return peft_config, training_arguments
 
-
 # COMMAND ----------
 
 # DBTITLE 1,Load Dataset
+
+# We will use the databricks dolly dataset See the following blog for more details
+# https://www.databricks.com/blog/2023/04/12/dolly-first-open-commercially-viable-instruction-tuned-llm 
 dataset_name = "databricks/databricks-dolly-15k"
 dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_cache)
 
