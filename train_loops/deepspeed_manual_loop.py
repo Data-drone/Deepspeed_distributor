@@ -6,7 +6,8 @@
 
 # COMMAND ----------
 
-def full_train_loop(peft_config, training_arguments, dataset, distributor:bool=True):
+def full_train_loop(peft_config, training_arguments, dataset, 
+                    distributor:bool=True):
 
     """
     Deepspeed isn't handling train_batch here if it is string:

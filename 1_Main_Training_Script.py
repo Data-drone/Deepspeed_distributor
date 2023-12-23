@@ -22,7 +22,9 @@ dbutils.library.restartPython()
 
 # we can create a generic setup
 from datasets import load_dataset
-import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # COMMAND ----------
 
@@ -31,7 +33,21 @@ import os
 # MAGIC To start with, we will setup some basic configurations \
 # MAGIC We log the notebook token and host so that we can connect to the mlflow service correctly \
 # MAGIC We will also manually setup an mlflow experiment \
-# MAGIC The cache directories we setup to make sure that models are datasets are use dbfs object store paths so that all data and models are persisted
+# MAGIC The cache directories we setup to make sure that models are datasets are use dbfs object store paths so that all data and models are persisted \
+# MAGIC This notebook is setup so that you can try out distributed deep learning with:
+# MAGIC - Native Accelerate (single node only)
+# MAGIC - Spark TorchDistributor (wo DeepSpeed Acceleration)
+# MAGIC - Spark DeepspeedDistributor (w DeepSpeed using HF Trainer)
+# MAGIC - Spark TorchDistributor (w DeepSpeed using a custom training loop)
+
+# COMMAND ----------
+
+# we setup all these widgets so that you can setup a databricks Workflow and queue these up to execute without having to manually watch the job
+dbutils.widgets.dropdown("distribution_mechanism", "Deepspeed_HF_Trainer", 
+                         ["accelerate", "TorchDistributor", "Deepspeed_HF_Trainer", "Deepspeed_Custom_Loop"])
+dbutils.widgets.text("num_gpus_per_node", "2")
+dbutils.widgets.text("num_nodes", "1")
+dbutils.widgets.dropdown("deepspeed_stage", "stage_3_offload", ["stage_1", "stage_2", "stage_3", "stage_3_offload"])
 
 # COMMAND ----------
 
@@ -48,6 +64,12 @@ datasets_cache = f'/home/{username}/datasets_cache'
 model_cache_root = f'/home/{username}/hf_models'
 dbfs_datasets_cache = f'/dbfs{datasets_cache}'
 
+# execution option
+exec_opt = dbutils.widgets.get("distribution_mechanism")
+num_gpus = int(dbutils.widgets.get("num_gpus_per_node"))
+num_nodes = int(dbutils.widgets.get("num_nodes"))
+deepspeed_stage = dbutils.widgets.get("deepspeed_stage")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -63,7 +85,7 @@ shared_parameters = {
    "gradient_clipping": 0.3,
    "per_device_batch_size": 4,
    "learning_rate": 2e-4,
-   "warmup_steps": 10
+   "warmup_steps": 100
 }
 
 # COMMAND ----------
@@ -100,7 +122,6 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
     learning_rate = shared_parameters['learning_rate']
     max_grad_norm = shared_parameters['gradient_clipping']
     #max_steps = 100
-    warmup_ratio = 0.03
     lr_scheduler_type = "constant"
 
     # this is the HF TrainingArguments object which is needed for the HF Trainer
@@ -115,7 +136,7 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
         fp16=True,
         max_grad_norm=max_grad_norm,
         num_train_epochs = 2,
-        warmup_ratio=warmup_ratio,
+        warmup_steps = shared_parameters['warmup_steps'],
         group_by_length=True,
         lr_scheduler_type=lr_scheduler_type,
         ddp_find_unused_parameters=False,
@@ -147,62 +168,102 @@ dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_ca
 # COMMAND ----------
 
 # DBTITLE 1,Launch with Accelerate (single node only)
-import accelerate
-from accelerate import notebook_launcher
 
-def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
+# Note that rerunning this notebook without restarting the node may cause issues
+# This is because accelerate notebook_launcher requires that CUDA status be fresh when it starts
+# Importing `torch`` or `transformers` for example will initialise CUDA stopping `notebook_launcher``
 
-    peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
-                                                   mlflow_run_name=mlflow_run_name)
-    trainer = train(peft_config, training_arguments, dataset, distributor=True)
+if exec_opt == 'accelerate':
+    import accelerate
+    from accelerate import notebook_launcher
 
-    return trainer
+    def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
 
-# we need to write a config
-#accelerate.utils.write_basic_config()
+        peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
+                                                    mlflow_run_name=mlflow_run_name)
+        trainer = train(peft_config, training_arguments, dataset, distributor=True)
 
-num_gpus_on_driver = 1
-notebook_launcher(accelerate_train, (f'accelerate_run_{num_gpus_on_driver}_gpu', None), 
-                  num_processes=num_gpus_on_driver)
+        return trainer
+
+    # if we need to write a config
+    # accelerate.utils.write_basic_config()
+
+    num_gpus_on_driver = num_gpus
+
+    logger.info(f"Launching job with accelerate with {num_gpus_on_driver} gpus")
+    notebook_launcher(accelerate_train, (f'accelerate_run_{num_gpus_on_driver}_gpu', None), 
+                    num_processes=num_gpus_on_driver)
 
 # COMMAND ----------
 
 # DBTITLE 1,Launch with TorchDistributor
-from pyspark.ml.torch.distributor import TorchDistributor
+    
+# To distribute across multinode, we need at least TorchDistributor
 
-def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
-   
-    peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
-                                                   mlflow_run_name=mlflow_run_name)
-    trainer = train(peft_config, training_arguments, dataset, distributor=True)
+if exec_opt == 'TorchDistributor':  
+    from pyspark.ml.torch.distributor import TorchDistributor
 
-    return trainer
+    def accelerate_train(mlflow_run_name:str='accelerate_run', deepspeed=None):
+    
+        peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
+                                                    mlflow_run_name=mlflow_run_name)
+        trainer = train(peft_config, training_arguments, dataset, distributor=True)
 
-# Test this code with TorchDistributor?
-num_gpus_per_node = 1
-num_nodes = 2
-num_processes = num_gpus_per_node * num_nodes
+        return trainer
 
-distributor = TorchDistributor(num_processes=num_processes, 
-                               local_mode=True, use_gpu=True)
-completed_trainer = distributor.run(accelerate_train, f'distributor_run_multinode')
+    num_gpus_per_node = num_gpus
+    num_nodes = num_nodes
+    num_processes = num_gpus_per_node * num_nodes
+    local_status = True if num_nodes == 1 else False
+
+
+    distributor = TorchDistributor(num_processes=num_processes, 
+                                local_mode=local_status, use_gpu=True)
+    
+    logger.info(f"Launching job with TorchDistributor with {num_gpus_per_node} gpus per node and {num_nodes} nodes")
+    completed_trainer = distributor.run(accelerate_train, f'distributor_run_multinode')
 
 # COMMAND ----------
 
-# DBTITLE 1,Launch with Deepspeed Distributor
+# MAGIC %md
+# MAGIC # Using the DeepSpeed Distributor
+# MAGIC Deepspeed requires setting up the deepspeed configurations as discussed earlier.\
+# MAGIC It gets more complicated when we use it with HuggingFace Trainer because we need to make sure that parameters which appear in both are aligned \
+# MAGIC That is why we created the shared parameter dictionary earlier and use it instantiate our deepspeed configs \
+# MAGIC In your own production code you may want to just setting for one deepspeed configuration and do away with this complexity.
+    
+# COMMAND ----------
+
+# DBTITLE 1,Deepspeed Configurations
 # MAGIC %run ./configs/deepspeed_configs
 
 # COMMAND ----------
 
-# DBTITLE 1, Low Level Loop
+# DBTITLE 1,Mapping widgets value to configs
+if deepspeed_stage == 'stage_1':    
+    deepspeed_mode = deepspeed_zero_1
+elif deepspeed_stage == 'stage_2':
+    deepspeed_mode = deepspeed_zero_2
+elif deepspeed_stage == 'stage_3':
+    deepspeed_mode = deepspeed_zero_3
+elif deepspeed_stage == 'stage_3_offload':
+    deepspeed_mode = deepspeed_zero_3_offload
+
+# COMMAND ----------
+
+# DBTITLE 1, Low Level Loop if you want to customise it
 # MAGIC %run ./train_loops/deepspeed_manual_loop
+
 # COMMAND ----------
 
 from pyspark.ml.deepspeed.deepspeed_distributor import DeepspeedTorchDistributor
 
 def parse_deepspeed():
+
     """
-    DeepSpeed Distributor adds in the deepspeed configurations params
+    Spark DeepSpeed Distributor adds in the deepspeed configurations params
+    As part of the initialisation process
+    To make use of them in our training process, we can parse the args to use in our train loops
     We can receive and use them with argparse
     """
 
@@ -214,35 +275,81 @@ def parse_deepspeed():
 
     return parser
 
+# COMMAND ----------
 
-def deepspeed_train():
+# DBTITLE 1, HF Trainer
     
-    parsed_args = parse_deepspeed().parse_args()
-    print(parsed_args)
-   
-    peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
-                                                   mlflow_run_name='deepspeed_distributor_w_config_low_level',
-                                                   deepspeed_config=parsed_args.deepspeed_config)
-    # can use `train` too
-    trainer = full_train_loop(peft_config, training_arguments, dataset, 
-                    distributor=True)
+if exec_opt == 'Deepspeed_HF_Trainer':  
+    
+    def deepspeed_train():
+        
+        parsed_args = parse_deepspeed().parse_args()
+        print(parsed_args)
+    
+        peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
+                                                    mlflow_run_name='deepspeed_distributor_w_trainer',
+                                                    deepspeed_config=parsed_args.deepspeed_config)
+        # can use `train` too
+        trainer = train(peft_config, training_arguments, dataset, 
+                        distributor=True,
+                        deepspeed=parsed_args.deepspeed)
 
-    return trainer
+        return trainer
 
-num_gpus = 2
-num_nodes = 1
-num_processes = num_gpus * num_nodes
-deepspeed_dict = deepspeed_zero_1
+    num_gpus = num_gpus
+    num_nodes = num_nodes
+    num_processes = num_gpus * num_nodes
+    local_status = True if num_nodes == 1 else False
 
-deepspeed_dict['train_batch_size'] = (
-    shared_parameters["per_device_batch_size"] *
-    shared_parameters["gradient_accumulation_steps"] *
-    num_processes
-)
+    deepspeed_dict = deepspeed_mode
 
-distributor = DeepspeedTorchDistributor(numGpus=num_gpus, nnodes=num_nodes, localMode=True, 
-                                        useGpu=True, deepspeedConfig = deepspeed_dict)
+    deepspeed_dict['train_batch_size'] = (
+        shared_parameters["per_device_batch_size"] *
+        shared_parameters["gradient_accumulation_steps"] *
+        num_processes
+    )
 
-completed_trainer = distributor.run(deepspeed_train)
+    distributor = DeepspeedTorchDistributor(numGpus=num_gpus, nnodes=num_nodes, localMode=local_status, 
+                                            useGpu=True, deepspeedConfig = deepspeed_dict)
+
+    completed_trainer = distributor.run(deepspeed_train)
+
+# COMMAND ----------
+
+# DBTITLE 1, Low Level Loop
+    
+if exec_opt == 'Deepspeed_Custom_Loop':  
+    
+    def deepspeed_train():
+        
+        parsed_args = parse_deepspeed().parse_args()
+        print(parsed_args)
+    
+        peft_config, training_arguments = setup_params(shared_parameters=shared_parameters,
+                                                    mlflow_run_name='deepspeed_distributor_w_config_low_level',
+                                                    deepspeed_config=parsed_args.deepspeed_config)
+        # can use `train` too
+        trainer = full_train_loop(peft_config, training_arguments, dataset, 
+                        distributor=True)
+
+        return trainer
+
+    num_gpus = num_gpus
+    num_nodes = num_nodes
+    num_processes = num_gpus * num_nodes
+    local_status = True if num_nodes == 1 else False
+
+    deepspeed_dict = deepspeed_mode
+
+    deepspeed_dict['train_batch_size'] = (
+        shared_parameters["per_device_batch_size"] *
+        shared_parameters["gradient_accumulation_steps"] *
+        num_processes
+    )
+
+    distributor = DeepspeedTorchDistributor(numGpus=num_gpus, nnodes=num_nodes, localMode=local_status, 
+                                            useGpu=True, deepspeedConfig = deepspeed_dict)
+
+    completed_trainer = distributor.run(deepspeed_train)
 
 # COMMAND ----------
