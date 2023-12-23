@@ -9,13 +9,13 @@
 # MAGIC It is never advisable to store passwords and tokens in plain text. In databricks secrets are the way to go. \
 # MAGIC See: [AWS Secrets](https://docs.databricks.com/en/security/secrets/index.html) | (Azure Secrets)[https://learn.microsoft.com/en-au/azure/databricks/security/secrets/]
 # MAGIC 
-# MAGIC Having to setup Databricks cli locally and use terminal can be a pain so you can also use our Python SDK
+# MAGIC Having to setup Databricks cli locally and use terminal may not be possible in some corporate environments you can also use our Python SDK
 # MAGIC See our [Python SDK Secrets Examples](https://github.com/databricks/databricks-sdk-py/blob/main/examples/secrets/put_secret_secrets.py) \
 # MAGIC **NOTE** with SDK you need to have the newest sdk installed `%pip install -U databricks-sdk`
 
 # COMMAND ----------
 
-# DBTITLE 1,HF Credentials
+# DBTITLE 1,HuggingFace Credential Setup
 import huggingface_hub
 huggingface_key = dbutils.secrets.get(scope='bootcamp_training', key='hf-key')
 huggingface_hub.login(token=huggingface_key)
