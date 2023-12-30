@@ -30,6 +30,7 @@ def full_train_loop(peft_config, training_arguments, dataset,
        DataCollatorForLanguageModeling
     )
     from peft import get_peft_model
+    from deepspeed.utils import logger as ds_logger
 
     os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
     os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
@@ -62,11 +63,6 @@ def full_train_loop(peft_config, training_arguments, dataset,
         low_cpu_mem_usage=False
     )
 
-    # Do we still need to set these flags?
-    #model.is_parallelizable = False
-    #model.model_parallel = False
-    ######
-
     model = get_peft_model(model, peft_config)
 
     # Setup tokenizer
@@ -90,18 +86,29 @@ def full_train_loop(peft_config, training_arguments, dataset,
        batch_size = training_arguments.per_device_train_batch_size
     )
 
+    # I think this isn't working cause it is a json file not 
+    deepspeed_arg = training_arguments.deepspeed
+    ds_logger.info(f'deepspeed argument is of type: {type(deepspeed_arg)}')
+
+    if type(deepspeed_arg) == str:
+        import json
+        with open(training_arguments.deepspeed, 'r') as file:
+            deepspeed_config_load = json.load(file)
+
+    elif type(deepspeed_arg) == dict:
+        deepspeed_config_load =deepspeed_arg
+
     try: 
-        offload_device = training_arguments.deepspeed['zero_optimization']['offload_optimizer']['device']
-        print(offload_device)
+        offload_device = deepspeed_config_load['zero_optimization']['offload_optimizer']['device']
+        ds_logger.info(f'DeepSpeed Offload: {offload_device}')
     except TypeError:
         offload_device = None
 
-    # if offload_device == 'cpu':
-    #    AdamOptimizer = DeepSpeedCPUAdam 
-    # else:
-    #    AdamOptimizer = FusedAdam
-    AdamOptimizer = DeepSpeedCPUAdam
-
+    if offload_device == 'cpu':
+       AdamOptimizer = DeepSpeedCPUAdam 
+    else:
+       AdamOptimizer = FusedAdam
+    
     optimizer = AdamOptimizer(model.parameters(),
                               lr=training_arguments.learning_rate,
                               betas=(0.9, 0.95))
@@ -127,6 +134,11 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
         # Manually log the training_arguments
         mlflow.log_params(training_arguments.to_dict())
+
+        ## Deepspeed config needs to be unpacked separately
+        ## some DS variables overlap with HF ones
+        mod_ds_args = {"ds_" + key: value for key, value in deepspeed_config_load.items()}
+        mlflow.log_params(mod_ds_args)
 
     for epoch in range(training_arguments.num_train_epochs):
       model.train()
