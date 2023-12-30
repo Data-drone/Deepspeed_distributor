@@ -96,12 +96,13 @@ def full_train_loop(peft_config, training_arguments, dataset,
             deepspeed_config_load = json.load(file)
 
     elif type(deepspeed_arg) == dict:
-        deepspeed_config_load =deepspeed_arg
+        deepspeed_config_load = deepspeed_arg
 
     try: 
         offload_device = deepspeed_config_load['zero_optimization']['offload_optimizer']['device']
         ds_logger.info(f'DeepSpeed Offload: {offload_device}')
-    except TypeError:
+    except (TypeError, KeyError) as e:
+        ds_logger.info(f'Offload detection error: {e}')
         offload_device = None
 
     if offload_device == 'cpu':
