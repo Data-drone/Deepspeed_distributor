@@ -35,6 +35,7 @@ def train(peft_config, training_arguments, dataset, distributor=True, deepspeed=
 
     os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
     os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
+    os.environ['MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING'] = "true"
     #os.environ['HF_MLFLOW_LOG_ARTIFACTS'] = 'True'
     
     os.environ['DATABRICKS_HOST'] = db_host

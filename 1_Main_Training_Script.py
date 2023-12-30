@@ -12,7 +12,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install peft==0.6.0 deepspeed==0.12.3 bitsandbytes==0.41.1
+# MAGIC %pip install peft==0.6.0 deepspeed==0.12.3 bitsandbytes==0.41.1 mlflow==2.9.2
 
 # COMMAND ----------
 

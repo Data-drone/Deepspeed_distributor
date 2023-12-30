@@ -33,6 +33,7 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
     os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
     os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
+    os.environ['MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING'] = 'true'
     #os.environ['HF_MLFLOW_LOG_ARTIFACTS'] = 'True'
     
     os.environ['DATABRICKS_HOST'] = db_host
@@ -95,9 +96,9 @@ def full_train_loop(peft_config, training_arguments, dataset,
     except TypeError:
         offload_device = None
 
-    #if offload_device == 'cpu':
+    # if offload_device == 'cpu':
     #    AdamOptimizer = DeepSpeedCPUAdam 
-    #else:
+    # else:
     #    AdamOptimizer = FusedAdam
     AdamOptimizer = DeepSpeedCPUAdam
 
@@ -123,7 +124,9 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
     if global_rank == 0:
         active_run = mlflow.start_run(run_name=training_arguments.run_name)
-        #mlflow.log_params(**training_arguments)
+
+        # Manually log the training_arguments
+        mlflow.log_params(training_arguments.to_dict())
 
     for epoch in range(training_arguments.num_train_epochs):
       model.train()
@@ -137,10 +140,13 @@ def full_train_loop(peft_config, training_arguments, dataset,
           model.backward(loss)
           model.step()
 
-          run_dict = {'loss': loss,
-          'step': step}
+          run_dict = {
+              'train_loss': loss,
+              'step': step
+            }
 
-          mlflow.log_metrics(run_dict) if global_rank == 0 else None
+          # we need to make sure step is defined properly
+          mlflow.log_metrics(metrics=run_dict, step=step) if global_rank == 0 else None
 
     return 'done'
 
