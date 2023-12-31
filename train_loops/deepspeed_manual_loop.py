@@ -71,10 +71,6 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
     train_dataset = setup_data(tokenizer, dataset)
 
-    # This specific processing is required to make sure it works
-    # with the DataLoader and train loop properly
-    #train_dataset = train_dataset.remove_columns(['instruction', 'response', 'context', 'text', 'category'])
-
     # setup trainer
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=False
@@ -86,10 +82,11 @@ def full_train_loop(peft_config, training_arguments, dataset,
        batch_size = training_arguments.per_device_train_batch_size
     )
 
-    # I think this isn't working cause it is a json file not 
     deepspeed_arg = training_arguments.deepspeed
     ds_logger.info(f'deepspeed argument is of type: {type(deepspeed_arg)}')
 
+    # Deepspeed Args can be a dict or a string
+    ## When it is a string we need to load the file first into a dict
     if type(deepspeed_arg) == str:
         import json
         with open(training_arguments.deepspeed, 'r') as file:
@@ -105,6 +102,7 @@ def full_train_loop(peft_config, training_arguments, dataset,
         ds_logger.info(f'Offload detection error: {e}')
         offload_device = None
 
+    # We need different optimizer depending on whether it is using offload or not
     if offload_device == 'cpu':
        AdamOptimizer = DeepSpeedCPUAdam 
     else:
@@ -131,6 +129,9 @@ def full_train_loop(peft_config, training_arguments, dataset,
     # device 
 
     ## setup distributed mlflow system metric logging
+    ## We want to log system usage on all nodes so we need to make sure that they are all
+    ## nested back with the correct parent
+
     if mlflow_parent_run:
         from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID  
         run_tags = {MLFLOW_PARENT_RUN_ID: mlflow_parent_run.info.run_id}
@@ -139,6 +140,8 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
     ds_logger.info(f'run_tags are: {run_tags}')
 
+    # We want to log all configs and track loss on our primary node
+    # But not on the other mlflow runs that exist just to log system stats
     if global_rank == 0:
         active_run = mlflow.start_run(run_name=training_arguments.run_name,
                                       tags=run_tags)
@@ -156,6 +159,7 @@ def full_train_loop(peft_config, training_arguments, dataset,
                                       tags=run_tags)
 
 
+    # Now we can start the run loop
     for epoch in range(training_arguments.num_train_epochs):
       model.train()
 
@@ -174,6 +178,7 @@ def full_train_loop(peft_config, training_arguments, dataset,
             }
 
           # we need to make sure step is defined properly
+          # We also only log loss on rank 0 node
           if global_rank == 0:
             mlflow.log_metrics(metrics=run_dict, step=step) if global_rank == 0 else None
 
