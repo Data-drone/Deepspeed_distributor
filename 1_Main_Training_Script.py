@@ -319,8 +319,10 @@ if exec_opt == 'Deepspeed_HF_Trainer':
 # DBTITLE 1, Low Level Loop
     
 if exec_opt == 'Deepspeed_Custom_Loop':  
+
+    import mlflow
     
-    def deepspeed_train():
+    def deepspeed_train(parent_run: str):
         
         parsed_args = parse_deepspeed().parse_args()
         print(parsed_args)
@@ -329,8 +331,9 @@ if exec_opt == 'Deepspeed_Custom_Loop':
                                                     mlflow_run_name='deepspeed_distributor_w_config_low_level',
                                                     deepspeed_config=parsed_args.deepspeed_config)
         # can use `train` too
+
         trainer = full_train_loop(peft_config, training_arguments, dataset, 
-                        distributor=True)
+                        distributor=True, mlflow_parent_run=parent_run)
 
         return trainer
 
@@ -347,9 +350,16 @@ if exec_opt == 'Deepspeed_Custom_Loop':
         num_processes
     )
 
+    if num_nodes > 1:
+        mlflow.set_experiment(experiment_path)
+        parent_run = mlflow.start_run(
+            run_name='deepspeed_distributor_w_config_low_level')
+    else:
+        parent_run = None
+
     distributor = DeepspeedTorchDistributor(numGpus=num_gpus, nnodes=num_nodes, localMode=local_status, 
                                             useGpu=True, deepspeedConfig = deepspeed_dict)
 
-    completed_trainer = distributor.run(deepspeed_train)
+    completed_trainer = distributor.run(deepspeed_train, parent_run)
 
 # COMMAND ----------

@@ -7,7 +7,7 @@
 # COMMAND ----------
 
 def full_train_loop(peft_config, training_arguments, dataset, 
-                    distributor:bool=True):
+                    distributor:bool=True, mlflow_parent_run=None):
 
     """
     Deepspeed isn't handling train_batch here if it is string:
@@ -130,8 +130,18 @@ def full_train_loop(peft_config, training_arguments, dataset,
     # training_arguments, model, train_dataloader
     # device 
 
+    ## setup distributed mlflow system metric logging
+    if mlflow_parent_run:
+        from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID  
+        run_tags = {MLFLOW_PARENT_RUN_ID: mlflow_parent_run.info.run_id}
+    else:
+        run_tags = {}
+
+    ds_logger.info(f'run_tags are: {run_tags}')
+
     if global_rank == 0:
-        active_run = mlflow.start_run(run_name=training_arguments.run_name)
+        active_run = mlflow.start_run(run_name=training_arguments.run_name,
+                                      tags=run_tags)
 
         # Manually log the training_arguments
         mlflow.log_params(training_arguments.to_dict())
@@ -140,6 +150,11 @@ def full_train_loop(peft_config, training_arguments, dataset,
         ## some DS variables overlap with HF ones
         mod_ds_args = {"ds_" + key: value for key, value in deepspeed_config_load.items()}
         mlflow.log_params(mod_ds_args)
+    
+    else:
+        active_run = mlflow.start_run(run_name=f"{training_arguments.run_name}_rank_{global_rank}",
+                                      tags=run_tags)
+
 
     for epoch in range(training_arguments.num_train_epochs):
       model.train()
@@ -159,7 +174,8 @@ def full_train_loop(peft_config, training_arguments, dataset,
             }
 
           # we need to make sure step is defined properly
-          mlflow.log_metrics(metrics=run_dict, step=step) if global_rank == 0 else None
+          if global_rank == 0:
+            mlflow.log_metrics(metrics=run_dict, step=step) if global_rank == 0 else None
 
     return 'done'
 
