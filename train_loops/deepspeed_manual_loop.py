@@ -71,6 +71,10 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
     train_dataset = setup_data(tokenizer, dataset)
 
+    # removve string columns
+    train_dataset = train_dataset.remove_columns(['text', 'category', 'instruction', 
+                                                 'context', 'response'])
+
     # setup trainer
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=False
