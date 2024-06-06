@@ -15,9 +15,34 @@
 
 # COMMAND ----------
 
+# MAGIC %md ## Setting up Secrets
+# MAGIC We will use databricks sdk to setup and log a huggingface key. 
+
+# COMMAND ----------
+
+# MAGIC %pip install -U databricks-sdk
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
+from databricks.sdk import WorkspaceClient
+
+scope_name = 'finetuning_dev'
+key_name = 'hf_key'
+hf_key = '<paste your key here DO NOT LOG TO SOURCE CONTROL!>'
+
+# Uncomment to write your key in
+# w = WorkspaceClient()
+# if scope_name not in [x.name for x in w.secrets.list_scopes()]:
+#     w.secrets.create_scope(scope=scope_name)
+
+# w.secrets.put_secret(scope=scope_name, key=key_name, string_value=hf_key)
+
+# COMMAND ----------
+
 # DBTITLE 1,HuggingFace Credential Setup
 import huggingface_hub
-huggingface_key = dbutils.secrets.get(scope='bootcamp_training', key='hf-key')
+huggingface_key = dbutils.secrets.get(scope=scope_name, key=key_name)
 huggingface_hub.login(token=huggingface_key)
 
 # setup home variables so that we don't run out of cache
@@ -29,21 +54,31 @@ os.environ['HUGGING_FACE_HUB_TOKEN'] = huggingface_key
 
 # COMMAND ----------
 
-# setup model path
-# In an enterprise env you may setup a shared folder for all users but I will store in a user folder here
-username = spark.sql("SELECT current_user()").first()['current_user()']
+# MAGIC %md ## Download and save models
+# MAGIC This will help us to load models faster than redownloading all the time \
+# MAGIC We will sav this to a UC volume but it is possible to use dbfs too.
 
-downloads_home = f'/home/{username}/hf_models'
-dbutils.fs.mkdirs(downloads_home)
-dbfs_downloads_home = f'/dbfs{downloads_home}'
+# COMMAND ----------
+
+catalog = 'brian_ml_dev'
+schema = 'gen_ai'
+volume = 'huggingface_models'
+
+spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.{volume}")
+volume_folder = f"/Volumes/{catalog}/{schema}/{volume}/"
 
 # COMMAND ----------
 
 # TODO for the AWQ libs we need to load the safetensors
 from huggingface_hub import hf_hub_download, list_repo_files
 
-repo_list = {'llama_2_7b': 'meta-llama/Llama-2-7b-chat-hf',
-             'llama_2_13b': 'meta-llama/Llama-2-13b-chat-hf',
+# repo_list = {'llama_2_7b': 'meta-llama/Llama-2-7b-chat-hf',
+#              'llama_2_70b': 'meta-llama/Llama-2-13b-chat-hf'}
+
+repo_list = {'llama_3_8b': 'meta-llama/Meta-Llama-3-8B',
+             'llama_3_70b': 'meta-llama/Meta-Llama-3-70B'}
 
 for lib_name in repo_list.keys():
     for name in list_repo_files(repo_list[lib_name]):
@@ -53,13 +88,13 @@ for lib_name in repo_list.keys():
                 pass
             else:
                 continue
-        target_path = os.path.join(dbfs_downloads_home, lib_name, name)
+        target_path = os.path.join(volume_folder, lib_name, name)
         if not os.path.exists(target_path):
             print(f"Downloading {name}")
             hf_hub_download(
                 repo_list[lib_name],
                 filename=name,
-                local_dir=os.path.join(dbfs_downloads_home, lib_name),
+                local_dir=os.path.join(volume_folder, lib_name),
                 local_dir_use_symlinks=False,
             )
 
