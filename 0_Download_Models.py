@@ -33,33 +33,36 @@ os.environ['HUGGING_FACE_HUB_TOKEN'] = huggingface_key
 # In an enterprise env you may setup a shared folder for all users but I will store in a user folder here
 username = spark.sql("SELECT current_user()").first()['current_user()']
 
-downloads_home = f'/home/{username}/hf_models'
-dbutils.fs.mkdirs(downloads_home)
-dbfs_downloads_home = f'/dbfs{downloads_home}'
+# migrate to volumes
+catalog = 'brian_ml_dev'
+schema = 'deepspeed_distributor'
+volume = 'model_Weights'
+
+spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.{volume}")
+
+#downloads_home = f'/home/{username}/hf_models'
+#dbutils.fs.mkdirs(downloads_home)
+#dbfs_downloads_home = f'/dbfs{downloads_home}'
+volume_downloads_home = f'/Volumes/{catalog}/{schema}/{volume}'
 
 # COMMAND ----------
 
 # TODO for the AWQ libs we need to load the safetensors
 from huggingface_hub import hf_hub_download, list_repo_files
 
-repo_list = {'llama_2_7b': 'meta-llama/Llama-2-7b-chat-hf',
-             'llama_2_13b': 'meta-llama/Llama-2-13b-chat-hf',
+repo_list = {'llama_3_1_8b': 'meta-llama/Llama-3.1-8B'}
 
 for lib_name in repo_list.keys():
     for name in list_repo_files(repo_list[lib_name]):
-        # skip all the safetensors data as we aren't using it and it's time consuming to download
-        if "safetensors" in name:
-            if lib_name in ['llama_2_13b_awq', 'llama_2_70b_awq']:
-                pass
-            else:
-                continue
-        target_path = os.path.join(dbfs_downloads_home, lib_name, name)
+        target_path = os.path.join(volume_downloads_home, lib_name, name)
         if not os.path.exists(target_path):
             print(f"Downloading {name}")
             hf_hub_download(
                 repo_list[lib_name],
                 filename=name,
-                local_dir=os.path.join(dbfs_downloads_home, lib_name),
+                local_dir=os.path.join(volume_downloads_home, lib_name),
                 local_dir_use_symlinks=False,
             )
 
