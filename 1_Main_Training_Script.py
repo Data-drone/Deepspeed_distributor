@@ -8,7 +8,7 @@
 # MAGIC 
 # MAGIC *Notes*
 # MAGIC This code was tested on MLR 15.4 \
-# MAGIC Versions of transformers and deepspeed are quite important \
+# MAGIC Versions of transformers and deepspeed are quite important
 
 # COMMAND ----------
 
@@ -138,7 +138,8 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
         save_steps=save_steps,
         logging_steps=logging_steps,
         learning_rate=learning_rate,
-        fp16=True,
+        bf16=True,
+        #fp16=True,
         max_grad_norm=max_grad_norm,
         num_train_epochs = 2,
         warmup_steps = shared_parameters['warmup_steps'],
