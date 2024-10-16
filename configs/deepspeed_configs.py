@@ -17,7 +17,7 @@ deepspeed_base = {
 	"gradient_accumulation_steps": shared_parameters['gradient_accumulation_steps'],
   "gradient_clipping": shared_parameters['gradient_clipping'],
 	"bf16": {
-		"enabled": "auto"
+		"enabled": "true"
 	},
   "optimizer": {
         "type": "AdamW",

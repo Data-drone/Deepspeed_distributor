@@ -46,7 +46,7 @@ def full_train_loop(peft_config, training_arguments, dataset,
 
     mlflow.set_registry_uri('databricks')
 
-    model_path = f'/dbfs{model_cache_root}/llama_2_7b'
+    model_path = f'{model_cache_root}/llama_3_1_8b/'
 
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)

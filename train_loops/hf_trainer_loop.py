@@ -47,7 +47,8 @@ def train(peft_config, training_arguments, dataset, distributor=True, deepspeed=
 
     mlflow.set_registry_uri('databricks')
 
-    model_path = f'/dbfs{model_cache_root}/llama_2_7b'
+    # cache root is set in triggering notebook
+    model_path = f'{model_cache_root}/llama_3_1_8b/'
 
     logger.info(f'Deepspeed: {deepspeed}')
     logger.info(f'Deepspeed Settings: {training_arguments.deepspeed}')

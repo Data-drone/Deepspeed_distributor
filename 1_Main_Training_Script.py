@@ -7,16 +7,13 @@
 # MAGIC But this is how we can leverage Accelerate driven HF Trainer on Databricks
 # MAGIC 
 # MAGIC *Notes*
-# MAGIC This code was tested on MLR 14.2 \
-# MAGIC Versions of transformers and deepspeed are quite important \
+# MAGIC This code was tested on MLR 15.4 \
+# MAGIC Versions of transformers and deepspeed are quite important
 
 # COMMAND ----------
 
-# MAGIC %pip install peft==0.6.0 deepspeed==0.12.3 bitsandbytes==0.41.1 mlflow==2.9.2
-
-# COMMAND ----------
-
-dbutils.library.restartPython()
+# MAGIC %pip install -U datasets deepspeed==0.15.2 transformers==4.45.2 accelerate==1.0.1 mlflow==2.17.0 trl peft bitsandbytes
+# MAGIC %restart_python 
 
 # COMMAND ----------
 
@@ -60,9 +57,17 @@ db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().api
 username = spark.sql("SELECT current_user()").first()['current_user()']
 experiment_path = f'/Users/{username}/deepspeed-distributor'
 
-datasets_cache = f'/home/{username}/datasets_cache'
-model_cache_root = f'/home/{username}/hf_models'
-dbfs_datasets_cache = f'/dbfs{datasets_cache}'
+# databricks volume
+catalog = 'brian_ml_dev'
+schema = 'deepspeed_distributor'
+model_volume = 'model_Weights'
+datasets_volume = 'datasets'
+
+# TODO set this up properly
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.{datasets_volume}")
+
+model_cache_root = f'/Volumes/{catalog}/{schema}/{model_volume}'
+vol_datasets_cache = f'/Volumes/{catalog}/{schema}/{datasets_volume}'
 
 # execution option
 exec_opt = dbutils.widgets.get("distribution_mechanism")
@@ -133,7 +138,8 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
         save_steps=save_steps,
         logging_steps=logging_steps,
         learning_rate=learning_rate,
-        fp16=True,
+        bf16=True,
+        #fp16=True,
         max_grad_norm=max_grad_norm,
         num_train_epochs = 2,
         warmup_steps = shared_parameters['warmup_steps'],
@@ -153,7 +159,7 @@ def setup_params(shared_parameters:dict, mlflow_run_name: str='single_run', deep
 # We will use the databricks dolly dataset See the following blog for more details
 # https://www.databricks.com/blog/2023/04/12/dolly-first-open-commercially-viable-instruction-tuned-llm 
 dataset_name = "databricks/databricks-dolly-15k"
-dataset = load_dataset(dataset_name, split="train", cache_dir = dbfs_datasets_cache)
+dataset = load_dataset(dataset_name, split="train", cache_dir = vol_datasets_cache)
 
 # COMMAND ----------
 
